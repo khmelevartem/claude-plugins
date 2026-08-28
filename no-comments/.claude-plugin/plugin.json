@@ -1,0 +1,15 @@
+{
+  "name": "no-comments",
+  "version": "1.1.0",
+  "description": "Rejects the whole edit when the agent writes a comment or a doc block, so the explanation goes back into the code: a named method, a named constant, a sharper type, a test. Comments carrying a ticket key are let through.",
+  "author": {
+    "name": "Artyom Khmelev",
+    "email": "khmelyovartyom@gmail.com"
+  },
+  "keywords": [
+    "hook",
+    "comments",
+    "code-quality",
+    "guardrail"
+  ]
+}

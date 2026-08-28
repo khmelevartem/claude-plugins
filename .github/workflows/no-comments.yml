@@ -1,0 +1,10 @@
+name: no-comments selftest
+
+on: [push, pull_request]
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 no-comments/hooks/no-comments.py --selftest

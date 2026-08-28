@@ -1,0 +1,18 @@
+{
+  "description": "Blocks comments in code on Edit/Write/MultiEdit/NotebookEdit, and blocks shell writes into source files that would bypass the check.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/no-comments.py\"",
+            "statusMessage": "No-comments guard",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

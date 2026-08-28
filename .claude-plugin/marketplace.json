@@ -12,6 +12,12 @@
       "description": "Shows context window usage after every turn and warns the model before auto-compact.",
       "source": "./context-meter",
       "category": "productivity"
+    },
+    {
+      "name": "no-comments",
+      "description": "Rejects the whole edit when the agent writes a comment or a doc block.",
+      "source": "./no-comments",
+      "category": "code-quality"
     }
   ]
 }
