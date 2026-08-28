@@ -1,0 +1,35 @@
+{
+  "name": "context-meter",
+  "version": "1.0.0",
+  "description": "Shows context window usage as a single line after every turn, and warns the model when the window is running out.",
+  "author": {
+    "name": "Artyom Khmelev",
+    "email": "khmelyovartyom@gmail.com"
+  },
+  "userConfig": {
+    "CONTEXT_WINDOW": {
+      "type": "number",
+      "title": "Context window, tokens",
+      "description": "Leave empty to detect it from the model name.",
+      "required": false
+    },
+    "YELLOW_AT": {
+      "type": "number",
+      "title": "Yellow from, %",
+      "description": "Below this the line is printed without formatting.",
+      "default": 20
+    },
+    "RED_AT": {
+      "type": "number",
+      "title": "Red from, %",
+      "description": "Takes precedence over the yellow threshold.",
+      "default": 30
+    },
+    "WARN_AT": {
+      "type": "number",
+      "title": "Warn the model at, %",
+      "description": "Adds a short notice about the upcoming auto-compact to the next prompt. Set to 100 to disable.",
+      "default": 40
+    }
+  }
+}

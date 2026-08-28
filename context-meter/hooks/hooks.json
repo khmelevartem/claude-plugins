@@ -1,0 +1,29 @@
+{
+  "description": "Context window meter",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/context-meter.py\"",
+            "statusMessage": "Context usage",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/context-meter.py\"",
+            "statusMessage": "Context usage",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

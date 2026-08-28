@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "khmelev-plugins",
+  "description": "Personal Claude Code plugins.",
+  "owner": {
+    "name": "Artyom Khmelev",
+    "email": "khmelyovartyom@gmail.com"
+  },
+  "plugins": [
+    {
+      "name": "context-meter",
+      "description": "Shows context window usage after every turn and warns the model before auto-compact.",
+      "source": "./context-meter",
+      "category": "productivity"
+    }
+  ]
+}
