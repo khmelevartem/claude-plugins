@@ -244,18 +244,94 @@ def write_targets(segment):
     return targets
 
 
+INTERPRETER = re.compile(r"\b(?:python[0-9.]*|node|ruby|perl|php|deno|bun)\b")
+SCRIPT_WRITE_TARGETS = [
+    re.compile(r"open\(\s*([^,()]+?)\s*,\s*['\"][wax]"),
+    re.compile(r"Path\(\s*([^()]+?)\s*\)\.write_(?:text|bytes)\("),
+    re.compile(r"\b(\w+)\.write_(?:text|bytes)\("),
+    re.compile(r"(?:write|append)File(?:Sync)?\(\s*([^,()]+?)\s*,"),
+    re.compile(r"(?:File|IO)\.write\(\s*([^,()]+?)\s*,"),
+    re.compile(r"file_put_contents\(\s*([^,()]+?)\s*,"),
+]
+STRING_LITERAL = re.compile(r"['\"]([^'\"\s]+)['\"]")
+SHELL_ASSIGNMENT = re.compile(r"(?:^|[\s;&|(])(\w+)=['\"]?([^\s'\";&|]+)")
+SHELL_VARIABLE = re.compile(r"\$\{?(\w+)\}?")
+SCRIPT_ARGUMENT = re.compile(r"\b(?:sys\.argv|process\.argv|ARGV)\b")
+
+
+def expand(target, variables):
+    return SHELL_VARIABLE.sub(lambda m: variables.get(m.group(1), m.group(0)), target)
+
+
+def shell_sources(command, variables):
+    words = strip_heredocs(command).split()
+    values = [expand(word.split("=", 1)[-1].strip("'\""), variables) for word in words]
+    return [value for value in values
+            if value.rsplit(".", 1)[-1].lower() in EXT and is_source(value)]
+
+
+def is_source(target):
+    if SCRATCH.search(target):
+        return False
+    name = target.rsplit("/", 1)[-1]
+    if "." not in name:
+        return False
+    return name.rsplit(".", 1)[-1].lower() not in SKIP_EXT
+
+
+def interpreter_scripts(command):
+    scripts = []
+    lines = command.split("\n")
+    n = 0
+    while n < len(lines):
+        line = lines[n]
+        match = HEREDOC.search(line)
+        n += 1
+        if not match:
+            continue
+        body = []
+        while n < len(lines) and lines[n].strip() != match.group(1):
+            body.append(lines[n])
+            n += 1
+        n += 1
+        if INTERPRETER.search(line):
+            scripts.append("\n".join(body))
+    stripped = strip_heredocs(command)
+    if INTERPRETER.search(stripped):
+        scripts.append(stripped)
+    return scripts
+
+
+def resolve_literal(argument, script):
+    literal = STRING_LITERAL.search(argument)
+    if literal:
+        return literal.group(1)
+    assigned = re.search(
+        r"\b%s\s*=\s*(?:Path\(\s*)?['\"]([^'\"]+)['\"]" % re.escape(argument), script)
+    return assigned.group(1) if assigned else None
+
+
+def script_target(command, variables):
+    for script in interpreter_scripts(command):
+        for pattern in SCRIPT_WRITE_TARGETS:
+            for argument in pattern.findall(script):
+                target = resolve_literal(argument.strip(), script)
+                if target and target.rsplit(".", 1)[-1].lower() in EXT and is_source(target):
+                    return target
+                if target is None and SCRIPT_ARGUMENT.search(script):
+                    sources = shell_sources(command, variables)
+                    if sources:
+                        return sources[0]
+    return None
+
+
 def blocked_shell(command):
+    variables = dict(SHELL_ASSIGNMENT.findall(strip_heredocs(command)))
     for segment in SEGMENT.split(strip_heredocs(command)):
         for target in write_targets(segment):
-            if SCRATCH.search(target):
-                continue
-            name = target.rsplit("/", 1)[-1]
-            if "." not in name:
-                continue
-            if name.rsplit(".", 1)[-1].lower() in SKIP_EXT:
-                continue
-            return target
-    return None
+            if is_source(expand(target, variables)):
+                return target
+    return script_target(command, variables)
 
 
 def rule_path():
@@ -380,6 +456,35 @@ def selftest():
     assert not blocked_shell("cat > notes.md")
     assert not blocked_shell("cat > out")
     assert not blocked_shell("cat <<EOF\ncat > src/Main.kt\nEOF")
+
+    assert blocked_shell(
+        "python3 - <<'EOF'\np='src/Main.kt'\ns=open(p).read()\n"
+        "open(p,'w').write(s)\nEOF") == "src/Main.kt"
+    assert blocked_shell(
+        "python3 -c \"from pathlib import Path; "
+        "Path('app/Foo.swift').write_text('x')\"") == "app/Foo.swift"
+    assert blocked_shell(
+        "python3 - <<'EOF'\np='src/A.kt'\nPath(p).write_text(s)\nEOF") == "src/A.kt"
+    assert blocked_shell(
+        "F=src/A.kt && python3 - \"$F\" <<'EOF'\nimport sys\np=sys.argv[1]\n"
+        "open(p,'w').write(s)\nEOF") == "src/A.kt"
+    assert blocked_shell("W=src/A.kt && git show HEAD:$W > $W") == "$W"
+    assert not blocked_shell("W=/tmp/A.kt && git show HEAD:src/A.kt > $W")
+    assert not blocked_shell(
+        "python3 - src/A.kt <<'EOF'\nimport sys\nprint(open(sys.argv[1]).read())\nEOF")
+    assert blocked_shell(
+        "node -e \"require('fs').writeFileSync('src/a.ts', s)\"") == "src/a.ts"
+    assert blocked_shell(
+        "ruby -e \"File.write('lib/a.rb', s)\"") == "lib/a.rb"
+
+    assert not blocked_shell(
+        "python3 - <<'EOF'\nprint(open('src/Main.kt').read())\nEOF")
+    assert not blocked_shell(
+        "python3 -c \"open('/tmp/out.kt','w').write('1.2.3')\"")
+    assert not blocked_shell(
+        "python3 -c \"open('notes.md','w').write(open('src/A.kt').read())\"")
+    assert not blocked_shell("cat src/Main.kt | node tools/check.js")
+    assert not blocked_shell("ls node_modules > out.txt")
     print("ok")
 
 

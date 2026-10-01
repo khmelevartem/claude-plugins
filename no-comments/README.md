@@ -33,7 +33,14 @@ to edit; `/plugin` updates it later.
 | `"""`, `'''`  | Python docstrings                                                      |
 
 Editing a source through the shell (redirect into a file, `sed -i`, `tee`) is
-rejected as well, otherwise the hook is bypassed with a single command.
+rejected as well, otherwise the hook is bypassed with a single command. So is a
+script run by an interpreter (`python`, `node`, `ruby`, `perl`, `php`, `deno`,
+`bun`) inline or from a heredoc that writes into a source: `open(p, 'w')`,
+`Path(p).write_text`, `writeFileSync`, `File.write`, `file_put_contents`. The
+target is taken from a string literal, from a variable assigned a literal in
+the script, or, when the script takes its path from `sys.argv`/`process.argv`,
+from the source paths on the command line. Shell variables assigned in the same
+command (`F=src/A.kt && ... > $F`) are expanded.
 
 Only what the edit *adds* counts. `Edit` compares `old_string` against
 `new_string`; `Write` compares the new content against the file already on
@@ -57,8 +64,13 @@ A file that does not exist yet has no baseline: every comment in it is new.
 
 ## Known gaps
 
-- A path built from a variable cannot be resolved, so a shell write through one
-  is rejected rather than guessed. Use a literal path.
+- A path built from a variable that is not assigned in the same command cannot
+  be resolved; such a write is checked only if the extension is visible
+  (`$DIR/Main.kt`). Use a literal path.
+- An interpreter writing through a script file (`python3 tool.py`) or through a
+  path computed at runtime is not checked.
+- A relative path is judged as written: `cd /tmp && python3 -c "open('A.kt','w')"`
+  is rejected.
 - A shell write to a file with no extension is not checked.
 - Source embedded in a string literal (a code sample inside a triple-quoted
   block) can be misread in both directions. Measured on the Python stdlib:
