@@ -1,5 +1,5 @@
 {
-  "description": "Blocks comments in code on Edit/Write/MultiEdit/NotebookEdit, and blocks shell writes into source files that would bypass the check.",
+  "description": "Blocks comments in code on Edit/Write/MultiEdit/NotebookEdit; snapshots source files around every shell command and rolls the command's file changes back if they add comments.",
   "hooks": {
     "PreToolUse": [
       {
@@ -9,7 +9,33 @@
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/no-comments.py\"",
             "statusMessage": "No-comments guard",
-            "timeout": 10
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/no-comments.py\"",
+            "statusMessage": "No-comments guard",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/no-comments.py\"",
+            "statusMessage": "No-comments guard",
+            "timeout": 30
           }
         ]
       }

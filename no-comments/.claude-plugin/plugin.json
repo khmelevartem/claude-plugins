@@ -1,7 +1,7 @@
 {
   "name": "no-comments",
-  "version": "1.2.0",
-  "description": "Rejects the whole edit when the agent writes a comment or a doc block, so the explanation goes back into the code: a named method, a named constant, a sharper type, a test. Comments carrying a ticket key are let through.",
+  "version": "1.3.0",
+  "description": "Rejects the whole edit when the agent writes a comment or a doc block, so the explanation goes back into the code: a named method, a named constant, a sharper type, a test. A shell command that adds a comment to a source file is rolled back. Comments carrying a ticket key are let through.",
   "author": {
     "name": "Artyom Khmelev",
     "email": "khmelyovartyom@gmail.com"

@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
+import hashlib
 import json
+import marshal
 import os
 import re
-import shlex
+import stat
+import subprocess
 import sys
 import tempfile
+import time
 
 TICKET = re.compile(r"\b[A-Z][A-Z0-9]{1,9}-\d{2,}\b")
 TRIPLE = re.compile(r'"""|\'\'\'')
@@ -189,164 +193,12 @@ def blocked(tool_input):
                for old, new in edits(tool_input, path))
 
 
-HEREDOC = re.compile(r"<<-?\s*[\"']?(\w+)[\"']?")
-SEGMENT = re.compile(r"[|;&\n]+")
-REDIRECT = re.compile(r"^\d*&?>>?\|?(?P<rest>.*)$")
-IN_PLACE = re.compile(r"^-\w*i")
-SCRATCH = re.compile(r"/tmp/|/dev/|scratch|tmpdir", re.IGNORECASE)
-
-
-def strip_heredocs(command):
-    kept = []
-    closing = None
-    for line in command.split("\n"):
-        if closing is not None:
-            if line.strip() == closing:
-                closing = None
-            continue
-        kept.append(line)
-        match = HEREDOC.search(line)
-        if match:
-            closing = match.group(1)
-    return "\n".join(kept)
-
-
-def tokens(segment):
-    try:
-        return shlex.split(segment, comments=False, posix=True)
-    except ValueError:
-        return segment.split()
-
-
-def write_targets(segment):
-    parts = tokens(segment)
-    targets = []
-    collecting = False
-    for n, part in enumerate(parts):
-        if not part:
-            continue
-        redirect = REDIRECT.match(part)
-        if redirect:
-            rest = redirect.group("rest")
-            if rest:
-                targets.append(rest)
-            elif n + 1 < len(parts):
-                targets.append(parts[n + 1])
-            continue
-        if part == "tee":
-            collecting = True
-            continue
-        if part in ("sed", "perl") and any(IN_PLACE.match(p) for p in parts[n + 1:]):
-            collecting = True
-            continue
-        if collecting and not part.startswith("-"):
-            targets.append(part)
-    return targets
-
-
-INTERPRETER = re.compile(r"\b(?:python[0-9.]*|node|ruby|perl|php|deno|bun)\b")
-SCRIPT_WRITE_TARGETS = [
-    re.compile(r"open\(\s*([^,()]+?)\s*,\s*['\"][wax]"),
-    re.compile(r"Path\(\s*([^()]+?)\s*\)\.write_(?:text|bytes)\("),
-    re.compile(r"\b(\w+)\.write_(?:text|bytes)\("),
-    re.compile(r"(?:write|append)File(?:Sync)?\(\s*([^,()]+?)\s*,"),
-    re.compile(r"(?:File|IO)\.write\(\s*([^,()]+?)\s*,"),
-    re.compile(r"file_put_contents\(\s*([^,()]+?)\s*,"),
-]
-STRING_LITERAL = re.compile(r"['\"]([^'\"\s]+)['\"]")
-SHELL_ASSIGNMENT = re.compile(r"(?:^|[\s;&|(])(\w+)=['\"]?([^\s'\";&|]+)")
-SHELL_VARIABLE = re.compile(r"\$\{?(\w+)\}?")
-SCRIPT_ARGUMENT = re.compile(r"\b(?:sys\.argv|process\.argv|ARGV)\b")
-
-
-def expand(target, variables):
-    return SHELL_VARIABLE.sub(lambda m: variables.get(m.group(1), m.group(0)), target)
-
-
-def shell_sources(command, variables):
-    words = strip_heredocs(command).split()
-    values = [expand(word.split("=", 1)[-1].strip("'\""), variables) for word in words]
-    return [value for value in values
-            if value.rsplit(".", 1)[-1].lower() in EXT and is_source(value)]
-
-
-def is_source(target):
-    if SCRATCH.search(target):
-        return False
-    name = target.rsplit("/", 1)[-1]
-    if "." not in name:
-        return False
-    return name.rsplit(".", 1)[-1].lower() not in SKIP_EXT
-
-
-def interpreter_scripts(command):
-    scripts = []
-    lines = command.split("\n")
-    n = 0
-    while n < len(lines):
-        line = lines[n]
-        match = HEREDOC.search(line)
-        n += 1
-        if not match:
-            continue
-        body = []
-        while n < len(lines) and lines[n].strip() != match.group(1):
-            body.append(lines[n])
-            n += 1
-        n += 1
-        if INTERPRETER.search(line):
-            scripts.append("\n".join(body))
-    stripped = strip_heredocs(command)
-    if INTERPRETER.search(stripped):
-        scripts.append(stripped)
-    return scripts
-
-
-def resolve_literal(argument, script):
-    literal = STRING_LITERAL.search(argument)
-    if literal:
-        return literal.group(1)
-    assigned = re.search(
-        r"\b%s\s*=\s*(?:Path\(\s*)?['\"]([^'\"]+)['\"]" % re.escape(argument), script)
-    return assigned.group(1) if assigned else None
-
-
-def script_target(command, variables):
-    for script in interpreter_scripts(command):
-        for pattern in SCRIPT_WRITE_TARGETS:
-            for argument in pattern.findall(script):
-                target = resolve_literal(argument.strip(), script)
-                if target and target.rsplit(".", 1)[-1].lower() in EXT and is_source(target):
-                    return target
-                if target is None and SCRIPT_ARGUMENT.search(script):
-                    sources = shell_sources(command, variables)
-                    if sources:
-                        return sources[0]
-    return None
-
-
-def blocked_shell(command):
-    variables = dict(SHELL_ASSIGNMENT.findall(strip_heredocs(command)))
-    for segment in SEGMENT.split(strip_heredocs(command)):
-        for target in write_targets(segment):
-            if is_source(expand(target, variables)):
-                return target
-    return script_target(command, variables)
-
-
 def rule_path():
     root = os.environ.get("CLAUDE_PLUGIN_ROOT")
     if not root:
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(root, "no-comments.md")
 
-
-SHELL_MSG = """Writing to a source file through the shell is rejected: %s
-
-Edit/Write go through no-comments, the shell does not.
-Redo the edit with Edit or Write.
-The shell may only write into temporary directories (/tmp, scratchpad), and
-only through a literal path: a path built from a variable cannot be checked."""
 
 MSG = """The whole edit is rejected: it contains comments.
 
@@ -374,6 +226,325 @@ edit, and offer the user to file a ticket.
 State in one line which way you picked.
 
 The full rule: %s"""
+
+SHELL_MSG = ("The whole shell command's file changes were rolled back: "
+             "they contain comments.\nRolled back: %s")
+
+
+EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
+SKIP_DIRS = {
+    ".git", ".hg", ".svn", ".idea", ".vscode", ".gradle", ".kotlin", "build",
+    "out", "target", "dist", "node_modules", "bower_components", "vendor",
+    ".venv", "venv", "__pycache__", ".mypy_cache", ".pytest_cache", ".tox",
+    ".ruff_cache", ".next", ".nuxt", ".svelte-kit", ".turbo", ".cache",
+    ".parcel-cache", "coverage", ".dart_tool", ".build", "Pods",
+    "DerivedData", ".terraform", ".cxx", ".externalNativeBuild",
+}
+MAX_FILES = 20_000
+MAX_TOTAL = 64_000_000
+STALE_SECONDS = 24 * 3600
+CLOCK_SLACK_NS = 2_000_000_000
+GIT_TOKEN = re.compile(r"[\w./@{}^~-]{1,100}")
+
+
+class TooLarge(Exception):
+    pass
+
+
+def project_dir(data):
+    return os.path.realpath(os.environ.get("CLAUDE_PROJECT_DIR")
+                            or data.get("cwd") or os.getcwd())
+
+
+def state_root():
+    uid = os.getuid() if hasattr(os, "getuid") else None
+    name = "claude-no-comments" if uid is None else "claude-no-comments-%d" % uid
+    root = os.path.join(tempfile.gettempdir(), name)
+    os.makedirs(root, mode=0o700, exist_ok=True)
+    info = os.lstat(root)
+    if stat.S_ISLNK(info.st_mode) or (uid is not None and info.st_uid != uid):
+        raise OSError("state directory is not ours: " + root)
+    return root
+
+
+def snapshot_path(data, project):
+    key = data.get("tool_use_id") or "cmd-" + hashlib.sha1(
+        (data.get("tool_input") or {}).get("command", "").encode()).hexdigest()
+    folder = os.path.join(state_root(),
+                          hashlib.sha1(project.encode()).hexdigest()[:16])
+    return folder, os.path.join(folder, re.sub(r"[^\w.-]", "_", key))
+
+
+def tracked(name):
+    return "." in name and name.rsplit(".", 1)[-1].lower() in EXT
+
+
+def walk(root, before=None, unchanged_before_ns=0, limited=False):
+    files, dirs, total = {}, set(), 0
+    for dirpath, dirnames, filenames in os.walk(root):
+        if dirpath != root and (".git" in dirnames or ".git" in filenames):
+            dirnames[:] = []
+            continue
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        rel_dir = os.path.relpath(dirpath, root)
+        dirs.add(rel_dir)
+        for name in filenames:
+            if not tracked(name):
+                continue
+            rel = os.path.normpath(os.path.join(rel_dir, name))
+            path = os.path.join(dirpath, name)
+            try:
+                info = os.lstat(path)
+            except OSError:
+                continue
+            if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_BASELINE:
+                continue
+            sig = (info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_ino)
+            known = before.get(rel) if before else None
+            if known and known[1] == sig and info.st_ctime_ns < unchanged_before_ns:
+                files[rel] = known
+                continue
+            try:
+                with open(path, "rb") as handle:
+                    content = handle.read()
+            except OSError:
+                continue
+            if b"\0" in content[:8192]:
+                continue
+            total += len(content)
+            if limited and (total > MAX_TOTAL or len(files) >= MAX_FILES):
+                raise TooLarge(root)
+            files[rel] = (info.st_mode, sig, content)
+    return files, dirs
+
+
+def decoded(content):
+    try:
+        return content.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def file_comments(rel, content):
+    text = decoded(content) if content is not None else None
+    return comments(text, syntax_for(rel)) if text is not None else set()
+
+
+def git(root, args, stdin=None):
+    try:
+        done = subprocess.run(["git"] + args, cwd=root, input=stdin,
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.stdout if done.returncode == 0 else None
+
+
+def stash_commits(root):
+    listing = git(root, ["stash", "list", "--format=%H"])
+    return listing.decode().split() if listing else []
+
+
+def named_revisions(command):
+    names = []
+    for word in re.split(r"[\s;&|()<>'\"`]+", command):
+        word = word.split("=", 1)[-1].split(":", 1)[0]
+        if word and not word.startswith("-") and GIT_TOKEN.fullmatch(word):
+            names.append(word)
+    return names[:40]
+
+
+def commits_before(root, started_ns, command, stashes):
+    since = started_ns // 1_000_000_000
+    listing = git(root, ["rev-list", "--parents", "--since=%d" % since, "HEAD"])
+    if listing is None:
+        return []
+    rows = [line.split() for line in listing.decode().splitlines()]
+    fresh = {row[0] for row in rows}
+    candidates = ["HEAD"] if not rows else []
+    candidates += [p for row in rows for p in row[1:] if p not in fresh]
+    candidates += list(stashes)
+    names = named_revisions(command)
+    if names:
+        found = git(root, ["cat-file", "--batch-check"],
+                    "".join(n + "^{commit}\n" for n in names).encode())
+        for line in (found or b"").decode().splitlines():
+            parts = line.split()
+            if len(parts) == 3 and parts[1] == "commit":
+                candidates.append(parts[0])
+    if not candidates:
+        return []
+    dated = git(root, ["log", "--no-walk=unsorted", "--format=%H %ct"]
+                + sorted(set(candidates)))
+    return [sha for sha, when in (line.split() for line in
+                                  (dated or b"").decode().splitlines())
+            if int(when) < since]
+
+
+def committed_blobs(root, commits, paths):
+    prefix = git(root, ["rev-parse", "--show-prefix"]) if commits else None
+    if prefix is None:
+        return {}
+    prefix = prefix.decode().strip()
+    requests = [(sha, rel) for rel in paths for sha in commits]
+    batch = "".join("%s:%s%s\n" % (sha, prefix, rel.replace(os.sep, "/"))
+                    for sha, rel in requests)
+    output = git(root, ["cat-file", "--batch"], batch.encode()) or b""
+    blobs, at = {}, 0
+    for _, rel in requests:
+        end = output.find(b"\n", at)
+        if end < 0:
+            break
+        header = output[at:end].split()
+        at = end + 1
+        if len(header) == 3 and header[1] == b"blob":
+            size = int(header[2])
+            blobs.setdefault(rel, []).append(output[at:at + size])
+            at += size + 1
+    return blobs
+
+
+def added_comments(before, after):
+    created = sorted(p for p in after if p not in before)
+    modified = sorted(p for p in after if p in before and after[p][2] != before[p][2])
+    deleted = sorted(p for p in before if p not in after)
+    moved = set()
+    for p in deleted:
+        moved |= file_comments(p, before[p][2])
+    offenders = {}
+    for p in created + modified:
+        if decoded(after[p][2]) is None:
+            continue
+        known = file_comments(p, before[p][2]) if p in before else set(moved)
+        added = file_comments(p, after[p][2]) - known
+        if added:
+            offenders[p] = added
+    return created, modified, deleted, offenders
+
+
+def drop_committed(root, snap, command, offenders):
+    commits = commits_before(root, snap["started"], command, snap["stashes"])
+    blobs = committed_blobs(root, commits, sorted(offenders))
+    for rel, contents in blobs.items():
+        for content in contents:
+            offenders[rel] -= file_comments(rel, content)
+    return {rel: added for rel, added in offenders.items() if added}
+
+
+def write_back(path, mode, mtime_ns, content):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if os.path.islink(path):
+        os.remove(path)
+    try:
+        handle = open(path, "wb")
+    except PermissionError:
+        os.chmod(path, 0o600)
+        handle = open(path, "wb")
+    with handle:
+        handle.write(content)
+    os.chmod(path, stat.S_IMODE(mode))
+    os.utime(path, ns=(mtime_ns, mtime_ns))
+
+
+def roll_back(root, snap, after_dirs, created, changed):
+    for rel in created:
+        try:
+            os.remove(os.path.join(root, rel))
+        except OSError:
+            pass
+    for rel in changed:
+        mode, sig, content = snap["files"][rel]
+        try:
+            write_back(os.path.join(root, rel), mode, sig[1], content)
+        except OSError:
+            pass
+    for rel in sorted(after_dirs - snap["dirs"], key=lambda d: d.count(os.sep),
+                      reverse=True):
+        try:
+            os.rmdir(os.path.join(root, rel))
+        except OSError:
+            pass
+
+
+def forget_stale(folder):
+    limit = time.time() - STALE_SECONDS
+    for name in os.listdir(folder):
+        path = os.path.join(folder, name)
+        try:
+            if os.lstat(path).st_mtime < limit:
+                os.remove(path)
+        except OSError:
+            pass
+
+
+def shell_before(data):
+    project = project_dir(data)
+    command = (data.get("tool_input") or {}).get("command", "")
+    folder, path = snapshot_path(data, project)
+    os.makedirs(folder, mode=0o700, exist_ok=True)
+    forget_stale(folder)
+    started = time.time_ns()
+    try:
+        files, dirs = walk(project, limited=True)
+    except TooLarge:
+        return 0
+    snap = {"project": project, "started": started, "files": files, "dirs": dirs,
+            "stashes": stash_commits(project) if "stash" in command else []}
+    partial = path + ".partial"
+    with open(partial, "wb") as handle:
+        marshal.dump(snap, handle)
+    os.replace(partial, path)
+    return 0
+
+
+def shell_after(data):
+    project = project_dir(data)
+    command = (data.get("tool_input") or {}).get("command", "")
+    _, path = snapshot_path(data, project)
+    try:
+        with open(path, "rb") as handle:
+            snap = marshal.load(handle)
+    except (OSError, EOFError, ValueError, TypeError):
+        return 0
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    root, before = snap["project"], snap["files"]
+    after, after_dirs = walk(root, before, snap["started"] - CLOCK_SLACK_NS)
+    created, modified, deleted, offenders = added_comments(before, after)
+    if offenders:
+        offenders = drop_committed(root, snap, command, offenders)
+    if not offenders:
+        return 0
+    roll_back(root, snap, after_dirs, created, modified + deleted)
+    restored = sorted([(p, "created") for p in created]
+                      + [(p, "modified") for p in modified]
+                      + [(p, "deleted") for p in deleted])
+    listing = ", ".join("%s (%s)" % item for item in restored)
+    message = MSG % rule_path()
+    print(SHELL_MSG % listing + message[message.index("\n"):], file=sys.stderr)
+    return 2
+
+
+def main():
+    raw = sys.stdin.read()
+    data = json.loads(raw) if raw.strip() else {}
+    tool = data.get("tool_name")
+    event = data.get("hook_event_name")
+    if tool in EDIT_TOOLS:
+        if event in (None, "PreToolUse") and blocked(data.get("tool_input") or {}):
+            print(MSG % rule_path(), file=sys.stderr)
+            return 2
+        return 0
+    if tool != "Bash":
+        return 0
+    if event == "PreToolUse":
+        return shell_before(data)
+    if event in ("PostToolUse", "PostToolUseFailure"):
+        return shell_after(data)
+    return 0
 
 
 def selftest():
@@ -438,53 +609,6 @@ def selftest():
         assert blocked({"file_path": os.path.join(folder, "New.kt"),
                         "content": kdoc})
 
-    assert blocked_shell("cat > src/Main.kt <<EOF") == "src/Main.kt"
-    assert blocked_shell("sed -i '' 's/a/b/' app/Foo.swift") == "app/Foo.swift"
-    assert blocked_shell("printf 'x' >> build.gradle.kts") == "build.gradle.kts"
-    assert blocked_shell("cat > app/x.php") == "app/x.php"
-    assert blocked_shell("cat > app/X.vue") == "app/X.vue"
-    assert blocked_shell("cat > lib/main.dart") == "lib/main.dart"
-    assert blocked_shell("echo x | tee src/Main.scala") == "src/Main.scala"
-    assert blocked_shell("cat > $DIR/Main.kt") == "$DIR/Main.kt"
-
-    assert not blocked_shell("grep -r foo --include=*.kt . > out.txt")
-    assert not blocked_shell("./gradlew build 2>/dev/null")
-    assert not blocked_shell("cat > /tmp/x.py <<EOF")
-    assert not blocked_shell("cat > $SCRATCHPAD/x.py")
-    assert not blocked_shell("sed -n '1,20p' src/Main.kt")
-    assert not blocked_shell("git diff -U0 | head -50")
-    assert not blocked_shell("cat > notes.md")
-    assert not blocked_shell("cat > out")
-    assert not blocked_shell("cat <<EOF\ncat > src/Main.kt\nEOF")
-
-    assert blocked_shell(
-        "python3 - <<'EOF'\np='src/Main.kt'\ns=open(p).read()\n"
-        "open(p,'w').write(s)\nEOF") == "src/Main.kt"
-    assert blocked_shell(
-        "python3 -c \"from pathlib import Path; "
-        "Path('app/Foo.swift').write_text('x')\"") == "app/Foo.swift"
-    assert blocked_shell(
-        "python3 - <<'EOF'\np='src/A.kt'\nPath(p).write_text(s)\nEOF") == "src/A.kt"
-    assert blocked_shell(
-        "F=src/A.kt && python3 - \"$F\" <<'EOF'\nimport sys\np=sys.argv[1]\n"
-        "open(p,'w').write(s)\nEOF") == "src/A.kt"
-    assert blocked_shell("W=src/A.kt && git show HEAD:$W > $W") == "$W"
-    assert not blocked_shell("W=/tmp/A.kt && git show HEAD:src/A.kt > $W")
-    assert not blocked_shell(
-        "python3 - src/A.kt <<'EOF'\nimport sys\nprint(open(sys.argv[1]).read())\nEOF")
-    assert blocked_shell(
-        "node -e \"require('fs').writeFileSync('src/a.ts', s)\"") == "src/a.ts"
-    assert blocked_shell(
-        "ruby -e \"File.write('lib/a.rb', s)\"") == "lib/a.rb"
-
-    assert not blocked_shell(
-        "python3 - <<'EOF'\nprint(open('src/Main.kt').read())\nEOF")
-    assert not blocked_shell(
-        "python3 -c \"open('/tmp/out.kt','w').write('1.2.3')\"")
-    assert not blocked_shell(
-        "python3 -c \"open('notes.md','w').write(open('src/A.kt').read())\"")
-    assert not blocked_shell("cat src/Main.kt | node tools/check.js")
-    assert not blocked_shell("ls node_modules > out.txt")
     print("ok")
 
 
@@ -492,13 +616,8 @@ if __name__ == "__main__":
     if "--selftest" in sys.argv:
         selftest()
         sys.exit(0)
-    data = json.load(sys.stdin)
-    tool_input = data.get("tool_input", {})
-    if data.get("tool_name") == "Bash":
-        target = blocked_shell(tool_input.get("command", ""))
-        if target:
-            print(SHELL_MSG % target, file=sys.stderr)
-            sys.exit(2)
-    elif blocked(tool_input):
-        print(MSG % rule_path(), file=sys.stderr)
-        sys.exit(2)
+    try:
+        status = main()
+    except Exception:
+        status = 0
+    sys.exit(status)
